@@ -16,9 +16,6 @@ class AiService {
   static const String nvidiaBaseUrl = 'https://integrate.api.nvidia.com/v1';
   static const String nvidiaDefaultModel = 'z-ai/glm-5.2';
 
-  /// Free, general-purpose chat endpoints verified in NVIDIA's NIM catalog.
-  /// The live /models response is intersected with this list so unavailable or
-  /// non-chat models never appear in PrivateAgent's NVIDIA model picker.
   static const List<String> nvidiaFreeChatModels = [
     'z-ai/glm-5.2',
     'nvidia/nemotron-3-nano-30b-a3b',
@@ -51,7 +48,7 @@ class AiService {
   String? _apiKey;
   String _baseUrl = _defaultBaseUrl;
   String _model = _defaultModel;
-  int _maxSteps = 15;
+  int _maxSteps = 60;
   bool _disableMaxSteps = false;
   double _temperature = 1.0;
   int _maxTokens = 1024;
@@ -110,7 +107,7 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     _apiKey = prefs.getString('api_key');
     _baseUrl = prefs.getString('api_base_url') ?? _defaultBaseUrl;
     _model = prefs.getString('api_model') ?? _defaultModel;
-    _maxSteps = prefs.getInt('api_max_steps') ?? 15;
+    _maxSteps = prefs.getInt('api_max_steps') ?? 60;
     _disableMaxSteps = prefs.getBool('api_disable_max_steps') ?? false;
     _temperature = prefs.getDouble('api_temperature') ?? 1.0;
     _maxTokens = prefs.getInt('api_max_tokens') ?? 1024;
@@ -125,7 +122,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
   }) async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Clean up the API key in case the user pasted "Bearer sk-..."
     String cleanApiKey = apiKey.trim();
     if (cleanApiKey.toLowerCase().startsWith('bearer ')) {
       cleanApiKey = cleanApiKey.substring(7).trim();
@@ -178,7 +174,7 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
   String get model => _model;
   String get apiKey => _apiKey ?? '';
   int get maxSteps => _disableMaxSteps ? 999 : _maxSteps;
-  int get rawMaxSteps => _maxSteps; // For the slider UI
+  int get rawMaxSteps => _maxSteps;
   bool get disableMaxSteps => _disableMaxSteps;
   double get temperature => _temperature;
   int get maxTokens => _maxTokens;
@@ -186,8 +182,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
   bool get useSystemPrompt => _useSystemPrompt;
 
   int get _effectiveMaxTokens {
-    // GLM is a reasoning model. With the app's 1,024-token default it can
-    // consume the whole budget reasoning and finish without visible content.
     if (isNvidiaBaseUrl(_baseUrl) &&
         _model == nvidiaDefaultModel &&
         _maxTokens < 4096) {
@@ -207,22 +201,18 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     }
   }
 
-  /// Send a message to the AI and get a response.
   Future<String> sendMessage(String message, {bool isAgentMode = true}) async {
     if (_apiKey == null || _apiKey!.isEmpty) {
       throw Exception('API Key is not configured. Please go to Settings.');
     }
 
-    // Add ONLY the text to the persistent conversation history to save tokens.
     _conversationHistory.add({'role': 'user', 'content': message});
 
-    // Keep conversation history manageable (last 20 messages)
     if (_conversationHistory.length > 20) {
       _conversationHistory.removeRange(0, _conversationHistory.length - 20);
     }
 
     try {
-      // Build the prompt including system instructions
       final systemPrompt = isAgentMode ? _systemPrompt : _chatSystemPrompt;
       final messages = [
         if (_useSystemPrompt) {'role': 'system', 'content': systemPrompt},
@@ -231,7 +221,7 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
 
       String requestUrl = _baseUrl;
       if (requestUrl.endsWith('/chat/completions')) {
-        requestUrl = requestUrl; // User already included it
+        requestUrl = requestUrl;
       } else {
         if (requestUrl.endsWith('/')) {
           requestUrl = '${requestUrl}chat/completions';
@@ -282,9 +272,7 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
               errorMessage = decoded['error'];
             }
           }
-        } catch (_) {
-          // ignore parsing errors, use raw body
-        }
+        } catch (_) {}
         throw Exception('API error (${response.statusCode}): $errorMessage');
       }
 
@@ -296,7 +284,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
       String assistantMessage =
           data['choices'][0]['message']['content'] as String;
 
-      // Strip <think> blocks commonly produced by reasoning models
       assistantMessage = assistantMessage
           .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
           .trim();
@@ -319,7 +306,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     }
   }
 
-  /// Send a message and stream the response chunk-by-chunk.
   Stream<String> sendMessageStream(
     String message, {
     bool isAgentMode = true,
@@ -393,7 +379,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
       final accumulatedContent = StringBuffer();
       bool inThinkBlock = false;
 
-      // Listen to response stream
       final lineStream = response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter());
@@ -418,17 +403,14 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
                   final content = rawContent;
                   accumulatedContent.write(content);
 
-                  // Handle <think> block stripping on the fly for better stream styling
                   if (content.contains('<think>')) {
                     inThinkBlock = true;
-                    // If there is text before <think>, yield it
                     final parts = content.split('<think>');
                     if (parts[0].isNotEmpty) {
                       yield parts[0];
                     }
                   } else if (content.contains('</think>')) {
                     inThinkBlock = false;
-                    // If there is text after </think>, yield it
                     final parts = content.split('</think>');
                     if (parts.length > 1 && parts[1].isNotEmpty) {
                       yield parts[1];
@@ -440,15 +422,12 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
                 if (choice['finish_reason'] != null) break;
               }
             }
-          } catch (_) {
-            // Ignore incomplete chunks
-          }
+          } catch (_) {}
         }
       }
 
       client.close();
 
-      // Clean up final accumulated response and add to history
       String finalResponse = accumulatedContent.toString().trim();
       finalResponse = finalResponse
           .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
@@ -467,8 +446,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     }
   }
 
-  /// Send a task execution message — no conversation history, low temperature, limited tokens.
-  /// This is much faster and cheaper than sendMessage.
   Future<AiResponse> sendTaskMessage(String systemPrompt, String prompt) async {
     if (_apiKey == null || _apiKey!.isEmpty) {
       throw Exception('API Key is not configured. Please go to Settings.');
@@ -523,9 +500,7 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
                 errorMessage = decoded['error'];
               }
             }
-          } catch (_) {
-            // ignore parsing errors, use raw body
-          }
+          } catch (_) {}
           throw Exception('API error (${response.statusCode}): $errorMessage');
         }
 
@@ -535,7 +510,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
         }
         String content = data['choices'][0]['message']['content'] as String;
 
-        // Strip <think> blocks commonly produced by reasoning models
         content = content
             .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
             .trim();
@@ -567,23 +541,19 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     }
   }
 
-  /// Parse the AI response to check if it's an action or plain text
   AgentAction? parseAction(String response) {
-    // Try to parse as JSON action
     try {
       final trimmed = response.trim();
-      // Handle if the response is wrapped in code fences
       String jsonStr = trimmed;
       if (trimmed.startsWith('```')) {
         final lines = trimmed.split('\n');
-        lines.removeAt(0); // Remove opening fence
+        lines.removeAt(0);
         if (lines.isNotEmpty && lines.last.trim() == '```') {
-          lines.removeLast(); // Remove closing fence
+          lines.removeLast();
         }
         jsonStr = lines.join('\n').trim();
       }
 
-      // If it looks like JSON but is missing a closing brace (common with some local models)
       if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) {
         jsonStr += '\n}';
       }
@@ -595,7 +565,6 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
             return AgentAction.fromJson(json);
           }
         } catch (e) {
-          // If it still fails, it might be deeply truncated, try adding another brace
           if (e.toString().contains('Unexpected end of input')) {
             jsonStr += '\n}';
             final json = jsonDecode(jsonStr) as Map<String, dynamic>;
@@ -605,20 +574,16 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
           }
         }
       }
-    } catch (_) {
-      // Not JSON, it's plain text conversation
-    }
+    } catch (_) {}
     return null;
   }
 
-  /// Fetches available models from the provider's /models endpoint
   Future<List<String>> fetchAvailableModels(
     String baseUrl,
     String apiKey,
   ) async {
     try {
       String cleanBaseUrl = baseUrl;
-      // Many providers host it at /models, but some require the base URL without /chat/completions logic
       if (cleanBaseUrl.endsWith('/chat/completions')) {
         cleanBaseUrl = cleanBaseUrl.replaceAll('/chat/completions', '');
       }
