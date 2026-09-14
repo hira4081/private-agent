@@ -11,10 +11,6 @@ import 'skill_memory_service.dart';
 import 'recovery_engine.dart';
 import '../models/saved_skill.dart';
 
-/// Executes multi-step UI automation tasks using LLM-guided screen reading.
-///
-/// Flow: User gives high-level goal → LLM reads screen → decides next action →
-/// executes → reads screen again → repeats until goal is complete.
 class TaskExecutor {
   final AiService _aiService;
   final ScreenAutomationService _screenService;
@@ -24,10 +20,8 @@ class TaskExecutor {
   final SkillMemoryService _skillMemory = SkillMemoryService();
   final RecoveryEngine _recoveryEngine = RecoveryEngine();
 
-  /// Callback to report progress messages to the UI
   final void Function(String message)? onProgress;
 
-  /// Set to true to cancel the running task
   bool _cancelled = false;
   Completer<void>? _cancelCompleter;
 
@@ -42,7 +36,6 @@ class TaskExecutor {
        _appLauncher = appLauncher,
        _shizukuService = shizukuService;
 
-  /// Cancel the currently running task — takes effect immediately
   void cancel() {
     _cancelled = true;
     if (_cancelCompleter != null && !_cancelCompleter!.isCompleted) {
@@ -51,54 +44,49 @@ class TaskExecutor {
   }
 
   static const String _taskSystemPrompt = '''
-You are a phone automation agent. You are given a TASK and the current SCREEN content.
-You must decide what single action to take next to accomplish the task.
+You are a FAST phone automation agent. Your goal is to complete the TASK in the FEWEST steps possible.
+You are given the current SCREEN content and a TASK.
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+Respond with ONLY a JSON object (no markdown):
 {
   "action": "action_name",
   "params": {"key": "value"},
-  "reasoning": "why you chose this action",
+  "reasoning": "brief reason",
   "is_complete": false
 }
 
 Available actions:
-- click_text: {"text": "exact text to click"} - Click an element by its visible text
-- click_at: {"x": 540, "y": 960} - Click at screen coordinates (use bounds from screen dump)
-- type_text: {"text": "hello", "field_hint": "optional hint"} - Type into the focused/first edit field
-- press_enter: {} - Press the Enter/Search key on the keyboard to submit a search/form
-- scroll: {"direction": "down"} - Scroll down/up on the current view
-- swipe: {"startX": 540, "startY": 2000, "endX": 540, "endY": 500} - Swipe from start to end coordinates (e.g. open app drawer, navigate carousels)
-- press_back: {} - Press the back button
-- press_home: {} - Press the home button
-- open_app: {"app_name": "WhatsApp"} - Open an app
-- wait: {} - Wait a moment for content to load
-- done: {} - Task is complete
+- click_text: {"text": "exact text to click"}
+- click_at: {"x": 540, "y": 960}
+- type_text: {"text": "hello"}
+- press_enter: {}
+- scroll: {"direction": "down"} (Max 3 scrolls total)
+- swipe: {"startX": 540, "startY": 2000, "endX": 540, "endY": 500}
+- press_back: {}
+- press_home: {}
+- open_app: {"app_name": "WhatsApp"}
+- open_package: {"package_name": "com.bykea.partner"}
+- wait: {}
+- done: {}
 
-Rules:
-- You will receive a TEXT DUMP of the accessibility tree containing exact text strings and center coordinates.
-- ALWAYS use the text dump to decide your next action.
-- If you need to click something, prefer using `click_text`. If the element does not have text, use `click_at` with the coordinates provided in the text dump.
-- When typing in a search box, you MUST click it first, wait a step, and THEN type.
-- After typing a search query, use `press_enter` once. If the screen does not change, click the exact visible suggestion text. Do not repeat the same submit action more than twice.
-- Never scroll or swipe more than three times in a row. After three scrolls, choose the best visible result or take a different action instead of continuing to browse indefinitely.
-- Set is_complete=true ONLY when the task is fully done.
-- If you need to find something by scrolling, scroll and then check the screen again.
-- If you need to open an app (like Wikipedia, Spotify, etc.) and you cannot find it after a couple of scrolls, ASSUME it is not installed. Immediately open Chrome or Google to search for the info on the web instead.
-- If stuck after 3 attempts, set is_complete=true and explain in reasoning.
-- Keep reasoning very brief (1 sentence)
+CRITICAL RULES FOR SPEED:
+1. PLAN AHEAD: Do not waste steps. If you need to open an app and search, do it directly.
+2. NO WASTED STEPS: Do not scroll aimlessly. If you cannot find something in 2 scrolls, use click_at with coordinates or open a different app.
+3. NO REPEATING: If an action fails, DO NOT repeat it. Try a completely different approach (e.g., if click_text fails, use click_at).
+4. If an app opens but doesn't load, wait one step, then try again. Do not close and reopen unless it crashes.
+5. Set is_complete=true ONLY when the task is 100% done.
+6. Keep reasoning to 3-4 words max.
+7. If you are stuck after 5 steps, set is_complete=true and explain why in reasoning.
+8. When asked to open a specific app, prefer open_package with the exact package name (e.g., com.bykea.partner, com.termux, com.android.chrome).
 ''';
 
-  /// Extract JSON safely even if wrapped in markdown or conversational text
   String _extractJson(String text) {
-    // 1. Try to find a markdown json code block
     final codeBlockRegex = RegExp(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```');
     final match = codeBlockRegex.firstMatch(text);
     if (match != null) {
       return match.group(1)!;
     }
 
-    // 2. Fallback: find the first { and the last }
     final startIndex = text.indexOf('{');
     final endIndex = text.lastIndexOf('}');
     if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
@@ -108,7 +96,6 @@ Rules:
     return text.trim();
   }
 
-  /// Execute a multi-step task with LLM guidance
   Future<String> executeTask(String userGoal) async {
     await ScreenAutomationService.logToNative(
       "[TaskExecutor] executeTask() CALLED with goal: $userGoal",
@@ -133,7 +120,6 @@ Rules:
     results.add('Starting task: $userGoal');
     _report('Starting task: $userGoal');
 
-    // Check skill memory first
     final savedSkill = await _skillMemory.findSkill(userGoal);
     if (savedSkill != null && savedSkill.isReliable) {
       _report(
@@ -162,7 +148,6 @@ Rules:
       }
     }
 
-    // Smart pre-launch shortcuts: execute common sequences without LLM
     final shortcut = _getNavigationShortcut(userGoal);
     String lastAction = '';
     int sameActionCount = 0;
@@ -193,12 +178,10 @@ Rules:
           executedSteps.add(step);
           lastAction = step.action;
         } else {
-          break; // Fall back to AI if shortcut step fails
+          break;
         }
       }
     } else {
-      // If no shortcut is used, and we are currently inside the PrivateAgent app,
-      // press Home so the AI doesn't see its own chat bubbles and get confused by the task text.
       final currentPkg = await _screenService.getCurrentPackage();
       if (currentPkg == 'com.orailnoor.privateagent') {
         _report('Moving to background...');
@@ -208,7 +191,6 @@ Rules:
     }
 
     for (int step = 0; step < _aiService.maxSteps; step++) {
-      // Check for cancellation
       if (_cancelled) {
         results.add('Task cancelled by user.');
         _report('Task cancelled.');
@@ -227,21 +209,18 @@ Rules:
         return 'Task cancelled.';
       }
 
-      // Adaptive delay: give Android apps time to transition screens, load data, or open keyboards
-      int delay = 1200; // Default 1.2s delay for most actions
-      if (lastAction == 'open_app') {
-        delay = 3000; // Apps need ~3 seconds to fully cold-start and render
+      int delay = 1200;
+      if (lastAction == 'open_app' || lastAction == 'open_package') {
+        delay = 3000;
       } else if (lastAction == 'type_text') {
-        delay =
-            2000; // Typing involves keyboards and often triggers heavy network requests (search)
+        delay = 2000;
       } else if (lastAction == 'click_text' || lastAction == 'click_at') {
-        delay = 1500; // Clicking usually triggers a screen transition
+        delay = 1500;
       } else if (lastAction == 'scroll') {
-        delay = 1000; // Scrolling is relatively fast
+        delay = 1000;
       }
       await Future.delayed(Duration(milliseconds: delay));
 
-      // 1. Read the current screen text
       final screenContent = _aiService.useScreenCompression
           ? await _screenService.getCompressedScreenDescription(userGoal)
           : await _screenService.getScreenDescription();
@@ -250,19 +229,16 @@ Rules:
         name: 'PrivateAgent',
       );
 
-      // Determine previous result string
       final prevResultStr = step > 0 && results.isNotEmpty
           ? '\nPREVIOUS ACTION RESULT: ${results.last}\n'
           : '';
 
-      // Build failure hint if agent is stuck in a loop
       String failureHint = '';
       if (consecutiveFailures >= 3) {
         failureHint =
             '\n\nWARNING: You have failed $consecutiveFailures times in a row with the same approach. You MUST try a completely different action. If open_app failed, try press_home and look for the app icon on the home screen instead. If click_text failed, use click_at with coordinates. Do NOT repeat the same failed action.';
       }
 
-      // 2. Build the prompt (system prompt is sent separately via sendTaskMessage)
       final prompt =
           '''TASK: $userGoal
 
@@ -272,13 +248,11 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
       developer.log('=== AI PROMPT ===\n$prompt', name: 'PrivateAgent');
 
-      // 3. Get AI response — races against cancel signal so Stop works immediately
       String response;
       try {
         _cancelCompleter = Completer<void>();
         final aiFuture = _aiService.sendTaskMessage(_taskSystemPrompt, prompt);
 
-        // Race: whichever finishes first wins
         final result = await Future.any([
           aiFuture.then((r) => r),
           _cancelCompleter!.future.then((_) => null),
@@ -347,7 +321,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         return 'I could not complete the task because the AI service failed.';
       }
 
-      // Check for cancellation after AI response
       if (_cancelled) {
         results.add('Task cancelled by user.');
         _report('Task cancelled.');
@@ -367,7 +340,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         return 'Task cancelled.';
       }
 
-      // 4. Parse the action (with one retry on failure)
       Map<String, dynamic>? actionJson;
       String? parsedJsonStr;
       try {
@@ -376,13 +348,11 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         actionJson = jsonDecode(jsonStr) as Map<String, dynamic>;
         parsedJsonStr = jsonStr;
       } catch (firstError) {
-        // First attempt failed — retry once
         developer.log(
           '=== JSON PARSE FAILED, RETRYING ===\nError: $firstError\nRaw: $response',
           name: 'PrivateAgent',
         );
         _report('Retrying step ${step + 1}...\n(Failed to parse: $firstError)');
-        // Wait 2 seconds before retrying to prevent rate-limit spam
         await Future.delayed(const Duration(seconds: 2));
         try {
           final retryResponse = await _aiService.sendTaskMessage(
@@ -447,9 +417,8 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         lastAction = action;
         continue;
       }
-      lastAction = action; // Track for adaptive delay
+      lastAction = action;
 
-      // 5. Execute the action
       bool success = false;
       String actionResult = '';
 
@@ -517,6 +486,12 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           success = actionResult.startsWith('Opened');
           break;
 
+        case 'open_package':
+          final pkgName = params['package_name'] as String? ?? '';
+          actionResult = await _appLauncher.openPackage(pkgName);
+          success = actionResult.startsWith('Launched');
+          break;
+
         case 'wait':
           await Future.delayed(const Duration(seconds: 1));
           actionResult = 'Waited';
@@ -542,7 +517,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         name: 'PrivateAgent',
       );
 
-      // Track consecutive failures to detect stuck loops
       if (!success) {
         if (action == lastFailedAction) {
           consecutiveFailures++;
@@ -551,7 +525,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           lastFailedAction = action;
         }
 
-        // If stuck for 5+ consecutive failures, give up on this task
         if (consecutiveFailures >= 5) {
           results.add(
             'Agent is stuck. Stopping task after $consecutiveFailures consecutive failures.',
@@ -605,7 +578,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
       results.add('Step ${step + 1}: $actionResult ($reasoning)');
 
-      // Provide progress feedback
       if (!isComplete && (step + 1) % 3 == 0) {
         await _screenService.showToast('Working... (Step ${step + 1})');
       }
@@ -625,11 +597,9 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           results,
         );
 
-        // Save to skill memory
         await _skillMemory.saveSkill(userGoal, executedSteps);
 
         await _screenService.showToast('Task Complete!');
-        // Wait 4 seconds so the user can see the result before jumping back
         await Future.delayed(const Duration(seconds: 4));
         return reasoning.trim().isEmpty ? 'Done.' : reasoning.trim();
       }
@@ -701,7 +671,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         !normalized.startsWith('error');
   }
 
-  /// Replays a saved skill without using the LLM
   Future<bool> _replaySkill(SavedSkill skill, List<String> results) async {
     for (int i = 0; i < skill.steps.length; i++) {
       if (_cancelled) return false;
@@ -709,9 +678,8 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       final step = skill.steps[i];
       _report('Replaying step ${i + 1}/${skill.steps.length}: ${step.action}');
 
-      // Delay before executing each step
       int delay = 1200;
-      if (step.action == 'open_app')
+      if (step.action == 'open_app' || step.action == 'open_package')
         delay = 3000;
       else if (step.action == 'type_text')
         delay = 2000;
@@ -779,6 +747,11 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           actionResult = await _appLauncher.openApp(appName);
           success = actionResult.startsWith('Opened');
           break;
+        case 'open_package':
+          final pkgName = step.params['package_name'] as String? ?? '';
+          actionResult = await _appLauncher.openPackage(pkgName);
+          success = actionResult.startsWith('Launched');
+          break;
         case 'wait':
           await Future.delayed(const Duration(seconds: 1));
           actionResult = 'Waited';
@@ -800,14 +773,13 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       );
 
       if (!success) {
-        return false; // Break out of replay if a step fails
+        return false;
       }
     }
 
-    return true; // All steps succeeded
+    return true;
   }
 
-  /// Returns predefined navigation steps for common tasks
   List<ActionStep>? _getNavigationShortcut(String goal) {
     final lower = goal.toLowerCase();
 
@@ -865,7 +837,6 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       }
     }
 
-    // Generic fallback for "open X"
     final openMatch = RegExp(r'^open\s+([a-zA-Z0-9]+)').firstMatch(lower);
     if (openMatch != null) {
       String app = openMatch.group(1)!;
